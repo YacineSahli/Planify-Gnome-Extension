@@ -149,11 +149,18 @@ A. **Upstream ask (implemented — PR-ready).** `GetTasks() → JSON`
    `docs/UPSTREAM_DBUS_PR.md` (gitignored); user opens the PR with
    `gh pr create --repo alainm23/planify --base main --head
    YacineSahli:feat/dbus-api --body-file docs/UPSTREAM_DBUS_PR.md`.
-B. **Extension-side seam (while waiting).** Isolate all SQLite access
-   behind one narrow backend object with the client-facing surface
-   (`listTasks()`, `completeTask(id)`, `addTask(text)`, `changed`
-   signal). The UI never touches the backend; the future D-Bus backend
-   becomes a drop-in. No behavior change.
+B. **Extension-side pivot (DONE 2026-10-05).** The extension is a pure
+   D-Bus client: `Gio.DBusProxy` + `Gio.bus_watch_name` for app presence,
+   `GetTasks` for data, `TasksChanged` for live updates, client-side
+   Pinned/Overdue/Today ordering (the API leaves order unspecified).
+   App-closed → launch-hint card; older app builds → "no live task API"
+   header. All SQLite access, the `database-path` setting and the file
+   monitor are REMOVED. GJS gotchas fixed en route: `DBusProxy.new_for_bus`
+   needs explicit `_promisify`, and the proxy's owner cache is unreliable
+   when the name is absent at creation (hence bus_watch_name).
+   Verified: e2e-nested (not-running, 14 checks) + new tests/e2e-live.sh
+   (real app build + real DB headlessly: 16 checks incl. live tasks and
+   API detection). Commit `5422582`.
 C. **D-Bus backend.** Once the API lands in a Planify release: swap the
    backend to a `Gio.DBusProxy`, keep SQLite only as an opt-in legacy
    fallback for older Planify versions, then remove it.
