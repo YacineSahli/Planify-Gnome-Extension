@@ -330,3 +330,17 @@
     padding: 4px 5px;
     font-size: 6px;
 }
+
+/* Trailing per-row button: opens the task in the Planify app. */
+.pqv-openbtn {
+    padding: 3px;
+    border-radius: 6px;
+    margin-left: 4px;
+    margin-right: 2px;
+    color: rgba(0, 0, 0, 0.45);
+    background-color: transparent;
+}
+.pqv-openbtn:hover {
+    color: rgba(0, 0, 0, 0.9);
+    background-color: rgba(0, 0, 0, 0.08);
+}

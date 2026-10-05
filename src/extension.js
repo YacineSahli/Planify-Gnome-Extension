@@ -360,6 +360,21 @@ class PlanifyStore {
         this._spawn(['flatpak', 'run', APP_ID]);
     }
 
+    /** Open a single task in the Planify app via its deep link — the app
+     *  presents its window and navigates to the item. Falls back to
+     *  launching the app without navigation. */
+    openTask(taskId) {
+        Gio.AppInfo.launch_default_for_uri_async(`planify://item/${taskId}`,
+            null, this._cancellable, (src, res) => {
+                try {
+                    src.launch_default_for_uri_finish(res);
+                } catch (e) {
+                    logWarn(`deep link failed: ${e.message}`);
+                    this.launchApp();
+                }
+            });
+    }
+
     _spawn(argv) {
         try {
             const proc = new Gio.Subprocess({
@@ -389,14 +404,14 @@ class PlanifyStore {
     }
 }
 
-const TaskRow = GObject.registerClass(
-class TaskRow extends PopupMenu.PopupBaseMenuItem {
+const TaskRow = GObject.registerClass({
+    Signals: {'open-requested': {param_types: [GObject.TYPE_STRING]}},
+}, class TaskRow extends PopupMenu.PopupBaseMenuItem {
     _init(task) {
         super._init({reactive: true, can_focus: true});
 
         this.task = task;
         this.done = false;
-        this._titleCorrectId = 0;
 
         // Drop the shell's row class: shell themes style .popup-menu-item
         // hover/selected with !important accent colors (and :selected can
@@ -456,8 +471,24 @@ class TaskRow extends PopupMenu.PopupBaseMenuItem {
             y_align: Clutter.ActorAlign.CENTER,
         });
         title.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+        title.x_expand = true;
         titleRow.add_child(title);
         this._title = title;
+
+        // Trailing affordance: open this task in the Planify app (deep
+        // link presents the window and navigates to the item).
+        this._openBtn = new St.Button({
+            style_class: 'pqv-openbtn',
+            child: new St.Icon({
+                gicon: Gio.ThemedIcon.new('adw-external-link-symbolic'),
+                icon_size: 12,
+            }),
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this._openBtn.connect('clicked', () => {
+            this.emit('open-requested', this.task.id);
+        });
+        titleRow.add_child(this._openBtn);
 
         const sub = new St.BoxLayout({
             style_class: 'pqv-sub',
@@ -573,72 +604,49 @@ class TaskRow extends PopupMenu.PopupBaseMenuItem {
     _expand() {
         this.expanded = true;
         this.add_style_class_name('pqv-row-expanded');
-        // Un-truncate the title: wrap to as many lines as it needs.
-        // Clutter's BoxLayout does not do height-for-width and St.Label
-        // does not either, so we compute the wrapped height ourselves
-        // (line height measured pre-wrap × ceil(naturalWidth/available))
-        // and pin it via min-height + explicit height.
-        const [, lineH] = this._title.clutter_text.get_preferred_height(-1);
-        const [, natW] = this._title.clutter_text.get_preferred_width(-1);
-        this._title.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
+        // Un-truncate the title: wrap to as many lines as it needs.        this._title.clutter_text.ellipsize = Pango.EllipsizeMode.NONE;
         this._title.clutter_text.line_wrap = true;
         this._title.clutter_text.single_line_mode = false;
         const box = this._descReveal;
         box.show();
-        // The title row is x_expand: its allocated width is the real
-        // available text width (the label's own allocation can still read
-        // as its natural width at this point). The quick estimate is
-        // deliberately generous; a correction pass then re-pins the height
-        // from the ACTUAL Pango layout (word-wrap wastes width, so the
-        // arithmetic alone under-counts lines).
-        this._relayoutWrappedTitle(lineH, natW, this._titleRow.get_size()[0] || 300);
-        if (this._titleCorrectId)
-            GLib.Source.remove(this._titleCorrectId);
-        this._titleCorrectId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 60, () => {
-            this._titleCorrectId = 0;
-            if (!this.expanded)
-                return GLib.SOURCE_REMOVE;
-            try {
-                const layout = this._title.clutter_text.get_layout();
-                const [, wrappedH] = layout.get_pixel_size();
-                const corrected = Math.ceil(wrappedH) + 4;
-                // Glide to the corrected height instead of snapping — the
-                // estimate above is deliberately generous, and a snap here
-                // is what made the expansion wobble. 160 ms so the settle
-                // lands together with the description reveal (60 + 160).
-                const current = this._title.get_height();
-                if (Math.abs(current - corrected) < 2)
-                    return GLib.SOURCE_REMOVE;
-                if (St.Settings.get().enable_animations) {
-                    this._title.set_style(`min-height: ${corrected}px;`);
-                    this._title.ease({
-                        height: corrected,
-                        duration: 160,
-                        mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-                    });
-                } else {
-                    this._title.set_style(`min-height: ${corrected}px;`);
-                    this._title.set_height(corrected);
-                }
-                this.queue_relayout();
-            } catch {
-                // label gone (rebuild) — nothing to correct
-            }
-            return GLib.SOURCE_REMOVE;
-        });
+        // Clutter's BoxLayout does not do height-for-width and St.Label
+        // does not either, and a live re-measure right after toggling wrap
+        // is stale — measure the wrapped height with a throwaway Pango
+        // layout instead. (An estimate + late correction pass made the
+        // expansion bounce.)
+        const available = Math.max(1, (this._titleRow.get_size()[0] || 300) - 12);
+        const targetH = this._measureWrapped(available) + 4;
+
         const rowW = this.get_size()[0] || 352;
         const [, natH] = this._descLabel.get_preferred_height(Math.max(1, rowW - 76));
+
         if (!St.Settings.get().enable_animations) {
+            this._title.set_style(`min-height: ${targetH}px;`);
+            this._title.set_height(targetH);
             box.height = -1;
             box.opacity = 255;
             return;
         }
+
+        // One coordinated motion: title and description grow together.
+        // The min-height pin is applied on completion so the eased height
+        // owns the row for the duration.
+        const startH = this._title.get_height();
+        this._title.set_height(startH);
+        this._title.ease({
+            height: targetH,
+            duration: 200,
+            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+            onComplete: () => {
+                this._title.set_style(`min-height: ${targetH}px;`);
+            },
+        });
         box.remove_all_transitions();
         box.set({height: 0, opacity: 0});
         box.ease({
             height: Math.max(1, natH),
             opacity: 255,
-            duration: 220,
+            duration: 200,
             mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             onComplete: () => {
                 box.height = -1; // back to natural size
@@ -646,23 +654,30 @@ class TaskRow extends PopupMenu.PopupBaseMenuItem {
         });
     }
 
-    _relayoutWrappedTitle(lineH, natW, available) {
-        // Slightly overestimate: +1 spare line absorbs word-wrap
-        // inefficiency until the correction pass measures the real layout.
-        const safeWidth = Math.max(1, available - 12);
-        const lines = Math.max(1, Math.ceil(natW / safeWidth) + 1);
-        const natH = lines * Math.max(1, lineH) + 4;
-        this._title.set_style(`min-height: ${natH}px;`);
-        this._title.set_height(natH);
+    _measureWrapped(available) {
+        try {
+            const ct = this._title.clutter_text;
+            const layout = Pango.Layout.new(ct.get_pango_context());
+            const font = ct.get_font_description();
+            if (font)
+                layout.setFontDescription(font);
+            layout.setText(this._title.text, -1);
+            layout.set_width(available * Pango.SCALE);
+            layout.set_wrap(Pango.WrapMode.WORD);
+            const [, h] = layout.get_pixel_size();
+            return Math.max(1, Math.ceil(h));
+        } catch {
+            // Fallback: the old arithmetic estimate (+1 spare line).
+            const [, lineH] = this._title.clutter_text.get_preferred_height(-1);
+            const [, natW] = this._title.clutter_text.get_preferred_width(-1);
+            const lines = Math.max(1, Math.ceil(natW / Math.max(1, available)) + 1);
+            return lines * Math.max(1, lineH);
+        }
     }
 
     _collapse() {
         this.expanded = false;
         this.remove_style_class_name('pqv-row-expanded');
-        if (this._titleCorrectId) {
-            GLib.Source.remove(this._titleCorrectId);
-            this._titleCorrectId = 0;
-        }
         this._title.remove_all_transitions();
 
         const box = this._descReveal;
@@ -714,6 +729,17 @@ class TaskRow extends PopupMenu.PopupBaseMenuItem {
         });
     }
 
+    hitsOpenButton(event) {
+        if (!event)
+            return false;
+        const [x, y] = event.get_coords();
+        if (x === undefined || x < 0 || y === undefined || y < 0)
+            return false;
+        const [cx, cy] = this._openBtn.get_transformed_position();
+        const [w, h] = this._openBtn.get_size();
+        return x >= cx && x <= cx + w && y >= cy && y <= cy + h;
+    }
+
     hitsDescription(event) {
         if (!this.expanded || !event)
             return false;
@@ -757,10 +783,6 @@ class TaskRow extends PopupMenu.PopupBaseMenuItem {
         if (this._copyFeedbackId) {
             GLib.Source.remove(this._copyFeedbackId);
             this._copyFeedbackId = 0;
-        }
-        if (this._titleCorrectId) {
-            GLib.Source.remove(this._titleCorrectId);
-            this._titleCorrectId = 0;
         }
         this.remove_all_transitions();
         super.destroy();
@@ -1122,6 +1144,9 @@ class QuickViewMenu extends PopupMenu.PopupMenu {
                 this._onRowActivate(row, event)
                     .catch(e => logWarn(`row activate: ${e.message}`));
             });
+            row.connect('open-requested', (_r, taskId) => {
+                this._store.openTask(taskId);
+            });
             this._list.add_child(row);
             this._rows.push(row);
         }
@@ -1135,6 +1160,11 @@ class QuickViewMenu extends PopupMenu.PopupMenu {
         const task = row.task;
         if (!this._store || !this._rows.includes(row))
             return; // extension disabled or list rebuilt meanwhile
+
+        if (row.hitsOpenButton(event)) {
+            this._store.openTask(task.id);
+            return;
+        }
 
         if (row.hitsCheckbox(event)) {
             // Circle click: complete after an undo window (misclicks).
