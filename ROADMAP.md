@@ -1,8 +1,15 @@
 # Roadmap
 
 Status: 2026-10-05, after a full code/packaging/tests/visual review.
-Phases: **v0.2** correctness & credibility → **v0.3** robustness & polish →
-**architecture track** (D-Bus) → **v1.0** extensions.gnome.org release.
+**Direction decision (2026-10-05): the extension stops reading Planify's
+SQLite database.** The primary track is now a proper D-Bus API provided
+by the Planify app (see *Primary track* below). The SQLite backend stays
+only as the temporary implementation until that API exists in a Planify
+release; v0.2 hardening of it is deliberately minimal (fix what is wrong
+today, invest nothing in its future).
+
+Phases: **primary track** (D-Bus) runs in parallel with
+**v0.2** correctness → **v0.3** polish → **v1.0** extensions.gnome.org.
 Line references are to `src/extension.js` at the current HEAD.
 
 ## v0.2 — correctness & credibility (next)
@@ -14,6 +21,7 @@ Line references are to `src/extension.js` at the current HEAD.
    WHERE with explicit parentheses; consciously decide whether pinned
    tasks *without* a due date belong in the Pinned section (what the OR
    was reaching for) and comment it. Add a fixture-DB regression case.
+   (Interim fix — the SQLite backend is being sunset; see Primary track.)
 2. **Teardown: cancel undo timers.** `QuickViewMenu.destroy()`
    (`extension.js:1356-1363`) never drains `_pending` — an undo timer
    pending at disable time later fires a completion (D-Bus action or a
@@ -110,39 +118,50 @@ Line references are to `src/extension.js` at the current HEAD.
       tab icons, retake screenshots without focus rings / text selection /
       the puzzle-piece compositing artifact.
 
-## Architecture track — the D-Bus conversation
+## Primary track — D-Bus API (the decision)
 
-18. **Data-layer abstraction.** Formalize `PlanifyStore`'s interface so a
-    D-Bus backend can replace SQLite reads without touching UI code
-    (prep for the maintainer's "database as API" objection).
-19. **Upstream proposal.** Ask alainm23 for `GetTasks() → JSON` +
-    `TasksChanged` signal (and an add-task action) on the app's existing
-    `io.github.alainm23.planify` D-Bus interface (`Services.DBusServer`).
-    Extension prefers D-Bus when present, SQLite fallback otherwise.
-20. **Background-app integration.** Pref "keep Planify running in the
-    background": spawn `flatpak run io.github.alainm23.planify
-    --background` at session start (flag verified: `hold()` without
-    window; full sync/reminders keep running). Fixes stale data when the
-    app is closed, enables app-closed completion/reminders. Offer via a
-    one-time footer prompt rather than default-on.
-21. **Schema-drift guard.** The extension couples to Planify's
-    Items/Projects columns, `due` JSON shape, `completed_at` layout,
-    priority semantics, D-Bus action signatures, CLI syntax and DB paths
-    (full inventory in the 2026-10-05 review). Add a cheap probe on
-    enable: on failure, show a "Planify format changed — update the
-    extension" state instead of "database not found" (pairs with #5).
-22. **Upstream bug reports to file** (independent of the extension):
-    CLI-created tasks are never uploaded to Todoist (no offline-queue
-    entry); `Services.DBusServer` declares `update_item` client-side but
-    never implements it; Planify's SQLite layer sets neither WAL nor
-    `busy_timeout` (concurrent writers can clobber sync cursors).
+The extension must not be a database client. Planify owns the semantics
+(schema, `due` JSON shape, today-view rules); exposing them over D-Bus
+fixes the fragility, the maintainer's objection, and — via a headless
+service mode — the stale-when-app-closed problem.
+
+A. **Upstream ask (ready to file).** Extend the app's existing
+   `io.github.alainm23.planify` interface (`Services.DBusServer.vala`,
+   currently only `add_item`) with `GetTasks() → JSON` (today + overdue +
+   pinned, Today-view semantics) and a `TasksChanged` signal. Everything
+   is already in memory in `Services.Store` — roughly a filter + small
+   serializer, well under 100 lines. Draft issue text:
+   `docs/UPSTREAM_DBUS_ISSUE.md` (gitignored). Offer: we implement the
+   app-side PR; maintainer shapes the interface if he prefers (query
+   params, variants, separate bus name).
+B. **Extension-side seam (while waiting).** Isolate all SQLite access
+   behind one narrow backend object with the client-facing surface
+   (`listTasks()`, `completeTask(id)`, `addTask(text)`, `changed`
+   signal). The UI never touches the backend; the future D-Bus backend
+   becomes a drop-in. No behavior change.
+C. **D-Bus backend.** Once the API lands in a Planify release: swap the
+   backend to a `Gio.DBusProxy`, keep SQLite only as an opt-in legacy
+   fallback for older Planify versions, then remove it.
+D. **Background service (the staleness fix).** Fold in the app's
+   existing `--background` flag via a pref: spawn it at session start so
+   the app (and its sync + reminders) stays alive, and the D-Bus API is
+   always there. The uninstalled
+   `data/io.github.alainm23.planify.service.in` upstream would make the
+   app D-Bus-activatable — worth proposing as the follow-up upstream.
+E. **Upstream bug reports to file** (independent of the extension):
+   CLI-created tasks are never uploaded to Todoist (no offline-queue
+   entry); `Services.DBusServer` declares `update_item` client-side but
+   never implements it; Planify's SQLite layer sets neither WAL nor
+   `busy_timeout` (concurrent writers can clobber sync cursors).
+
+## v0.2 — correctness & credibility (next)
 
 ## Later / feature ideas (from earlier discussions, unprioritized)
 
 - Overdue-only badge accent; "Tomorrow" preview section; project
   grouping/filter tabs; opt-in end-of-day recap notification; task
-  editing from the popup (needs #19); systray/panel-menu variant
-  experiment branch.
+  editing from the popup (needs the Primary-track D-Bus API); systray/
+  panel-menu variant experiment branch.
 
 ## Release track (v1.0)
 

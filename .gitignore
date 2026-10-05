@@ -1,3 +1,6 @@
 dist/
 *.zip
 src/schemas/gschemas.compiled
+docs/UPSTREAM_*.md
+.vscode/
+*.swp
