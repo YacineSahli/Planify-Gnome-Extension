@@ -118,6 +118,22 @@ check "task rows rendered for live tasks" True "$([[ $(status_key rows) -gt 0 ]]
 ext_call ToggleExpand "<0>" >/dev/null 2>&1; sleep 0.8
 ext_call ToggleExpand "<0>" >/dev/null 2>&1; sleep 0.5
 check "shell alive after expand/collapse" True "$(ext_call Status >/dev/null 2>&1 && echo True || echo False)"
+
+# Rebuild-vs-expanded-row stress: expand a row, force a TasksChanged-style
+# rebuild, click another row. Used to leave a destroyed row referenced in
+# _expandedRow — every later click died on the dead wrapper.
+ext_call Open >/dev/null; sleep 0.5
+ext_call ClickRow "<0>" >/dev/null 2>&1; sleep 0.4
+ext_call Refresh >/dev/null 2>&1; sleep 0.8
+ext_call ClickRow "<1>" >/dev/null 2>&1; sleep 0.4
+ext_call Refresh >/dev/null 2>&1; sleep 0.8
+ext_call ClickRow "<0>" >/dev/null 2>&1; sleep 0.4
+if grep -q "debug click row" "$LOG"; then
+    echo "FAIL: click routing hit a destroyed row"; grep "debug click row" "$LOG" | head -2
+else
+    echo "PASS: click routing survives rebuilds"
+fi
+ext_call Close >/dev/null; sleep 0.3
 ext_call Open >/dev/null; sleep 0.3
 check "double-open is a no-op" True "$(status_key open)"
 

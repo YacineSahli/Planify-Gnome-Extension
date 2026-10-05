@@ -79,6 +79,10 @@ const DEBUG_IFACE_XML = `
       <arg type="i" direction="in" name="index"/>
     </method>
     <method name="ToggleAdd"/>
+    <method name="Refresh"/>
+    <method name="ClickRow">
+      <arg type="i" direction="in" name="index"/>
+    </method>
     <method name="DebugSubmit">
       <arg type="s" direction="in" name="text"/>
     </method>
@@ -362,7 +366,8 @@ class PlanifyStore {
 
     /** Open a single task in the Planify app via its deep link — the app
      *  presents its window and navigates to the item. Falls back to
-     *  launching the app without navigation. */
+     *  launching the app without navigation. A silent activation may not
+     *  steal focus, so the window is raised explicitly once it maps. */
     openTask(taskId) {
         Gio.AppInfo.launch_default_for_uri_async(`planify://item/${taskId}`,
             null, this._cancellable, (src, res) => {
@@ -372,7 +377,25 @@ class PlanifyStore {
                     logWarn(`deep link failed: ${e.message}`);
                     this.launchApp();
                 }
+                this._raisePlanifyWindow();
             });
+    }
+
+    _raisePlanifyWindow() {
+        let tries = 0;
+        const id = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 250, () => {
+            const windows = global.display.get_tab_list(Meta.TabList.NORMAL, null);
+            const win = windows.find(w =>
+                (w.get_wm_class() ?? '').startsWith('io.github.alainm23.planify'));
+            if (win) {
+                Main.activateWindow(win, global.get_current_time());
+                return GLib.SOURCE_REMOVE;
+            }
+            tries++;
+            return tries > 12 ? GLib.SOURCE_REMOVE : GLib.SOURCE_CONTINUE;
+        });
+        if (this._cancellable)
+            this._cancellable.connect(() => GLib.Source.remove(id));
     }
 
     _spawn(argv) {
@@ -481,7 +504,7 @@ const TaskRow = GObject.registerClass({
             style_class: 'pqv-openbtn',
             child: new St.Icon({
                 gicon: Gio.ThemedIcon.new('adw-external-link-symbolic'),
-                icon_size: 12,
+                icon_size: 14,
             }),
             y_align: Clutter.ActorAlign.CENTER,
         });
@@ -595,10 +618,12 @@ const TaskRow = GObject.registerClass({
     }
 
     toggleExpand() {
+        logInfo(`DBG toggle ${this.task.id} was=${this.expanded} h=${this._title.get_height()}`);
         if (this.expanded)
             this._collapse();
         else
             this._expand();
+        logInfo(`DBG toggle ${this.task.id} now=${this.expanded}`);
     }
 
     _expand() {
@@ -632,6 +657,7 @@ const TaskRow = GObject.registerClass({
         // The min-height pin is applied on completion so the eased height
         // owns the row for the duration.
         const startH = this._title.get_height();
+        this._title.remove_all_transitions();
         this._title.set_height(startH);
         this._title.ease({
             height: targetH,
@@ -639,6 +665,7 @@ const TaskRow = GObject.registerClass({
             mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             onComplete: () => {
                 this._title.set_style(`min-height: ${targetH}px;`);
+                logInfo(`DBG expand pin ${this.task.id} h=${targetH}`);
             },
         });
         box.remove_all_transitions();
@@ -686,6 +713,7 @@ const TaskRow = GObject.registerClass({
         const box = this._descReveal;
         // Post-expansion state: single-line height, no wrap, no CSS pin.
         const finish = () => {
+            logInfo(`DBG collapse finish ${this.task.id}`);
             this._title.clutter_text.ellipsize = Pango.EllipsizeMode.END;
             this._title.clutter_text.line_wrap = false;
             this._title.clutter_text.single_line_mode = true;
@@ -1112,6 +1140,7 @@ class QuickViewMenu extends PopupMenu.PopupMenu {
         for (const row of this._rows)
             row.destroy();
         this._rows = [];
+        this._expandedRow = null;
         this._list.remove_all_children();
     }
 
@@ -1148,6 +1177,7 @@ class QuickViewMenu extends PopupMenu.PopupMenu {
                     .catch(e => logWarn(`row activate: ${e.message}`));
             });
             row.connect('open-requested', (_r, taskId) => {
+                this.close(); // the app window takes over; no stale list left up
                 this._store.openTask(taskId);
             });
             this._list.add_child(row);
@@ -1160,6 +1190,10 @@ class QuickViewMenu extends PopupMenu.PopupMenu {
     async _onRowActivate(row, event) {
         if (row.done || !this._store)
             return;
+        // A rebuild or an animate-out can leave a detached row referenced
+        // here; calling into it would silently do nothing.
+        if (this._expandedRow && !this._rows.includes(this._expandedRow))
+            this._expandedRow = null;
         const task = row.task;
         if (!this._store || !this._rows.includes(row))
             return; // extension disabled or list rebuilt meanwhile
@@ -1555,6 +1589,20 @@ export default class PlanifyQuickViewExtension extends Extension {
         }
         case 'ToggleAdd': {
             this._menu._toggleAddEntry();
+            invocation.return_value(null);
+            break;
+        }
+        case 'Refresh':
+            this._store.refresh().catch(e => logWarn(`debug refresh: ${e.message}`));
+            invocation.return_value(null);
+            break;
+        case 'ClickRow': {
+            // Routes through the real click path (no event → no hit zones).
+            const idx3 = params.deepUnpack()[0];
+            const row3 = this._menu._rows[idx3];
+            if (row3)
+                this._onRowActivate(row3, null)
+                    .catch(e => logWarn(`debug click row: ${e.message}`));
             invocation.return_value(null);
             break;
         }
