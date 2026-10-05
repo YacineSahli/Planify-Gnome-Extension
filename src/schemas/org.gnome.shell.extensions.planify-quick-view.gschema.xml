@@ -2,11 +2,6 @@
 <schemalist>
   <schema id="org.gnome.shell.extensions.planify-quick-view"
           path="/org/gnome/shell/extensions/planify-quick-view/">
-    <key name="database-path" type="s">
-      <default>""</default>
-      <summary>Planify database path override</summary>
-      <description>Path to Planify's database.db. When empty, the extension probes the standard native (~/.local/share/io.github.alainm23.planify/) and Flatpak (~/.var/app/...) locations. Useful for testing.</description>
-    </key>
     <key name="max-rows" type="i">
       <default>12</default>
       <summary>Maximum rows shown</summary>

@@ -72,13 +72,6 @@ export default class PlanifyQuickViewPreferences extends ExtensionPreferences {
             icon_name: 'applications-engineering-symbolic',
         });
 
-        const dbGroup = new Adw.PreferencesGroup({title: _('Planify database')});
-        const dbRow = new Adw.EntryRow({
-            title: _('Database path (empty = automatic)'),
-        });
-        settings.bind('database-path', dbRow, 'text', Gio.SettingsBindFlags.DEFAULT);
-        dbGroup.add(dbRow);
-
         const debugGroup = new Adw.PreferencesGroup({title: _('Developer')});
         const debugRow = new Adw.SwitchRow({
             title: _('Debug D-Bus interface'),
@@ -86,7 +79,6 @@ export default class PlanifyQuickViewPreferences extends ExtensionPreferences {
         });
         settings.bind('debug-dbus', debugRow, 'active', Gio.SettingsBindFlags.DEFAULT);
         debugGroup.add(debugRow);
-        advancedPage.add(dbGroup);
         advancedPage.add(debugGroup);
 
         window.add(listPage);

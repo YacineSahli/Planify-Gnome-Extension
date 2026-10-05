@@ -37,7 +37,7 @@ wait_ext 20 || { echo "FAIL: debug D-Bus did not appear (is the extension loaded
 
 STATE=$(ext_status)
 echo "$STATE"
-check "database found (real session)" True "$(echo "$STATE" | python3 -c "import sys,json;print(json.load(sys.stdin)['dbFound'])")"
+check "Planify app reachable over D-Bus" True "$(echo "$STATE" | python3 -c "import sys,json;print(json.load(sys.stdin)['running'])")"
 TASKS=$(echo "$STATE" | python3 -c "import sys,json;print(json.load(sys.stdin)['tasks'])")
 
 BTN=$(echo "$STATE" | python3 -c "
@@ -112,12 +112,22 @@ sleep 0.5
 ydotool key 28:1 28:0
 sleep 2.5
 TODAY=$(date +%F)
-if sqlite3 -readonly ~/.var/app/io.github.alainm23.planify/data/io.github.alainm23.planify/database.db \
-    "SELECT 1 FROM Items WHERE content LIKE '%🧪 pqv auto-add test%' AND substr(json_extract(due,'\$.date'),1,10) = '$TODAY';" \
-    2>/dev/null | grep -q 1; then
-    echo "PASS: inline quick-add created task due today"
+sleep 1.5
+ADDED=$(gdbus call --session --dest io.github.alainm23.planify \
+    --object-path /io/github/alainm23/planify \
+    --method io.github.alainm23.planify.GetTasks 2>/dev/null | python3 -c "
+import sys, ast, json
+raw = sys.stdin.read()
+tree = ast.literal_eval(raw[raw.index('('):])
+s = tree[0] if isinstance(tree, tuple) else tree
+doc = json.loads(s)
+today = '$TODAY'
+hits = [t for t in doc['tasks'] if 'pqv auto-add test' in t.get('content', '') and t['due']['date'][:10] == today]
+print(len(hits))")
+if [[ "$ADDED" == "1" ]]; then
+    echo "PASS: inline quick-add created task due today (visible via GetTasks)"
 else
-    echo "FAIL: inline quick-add task not found in database"
+    echo "FAIL: inline quick-add task not in GetTasks payload (got '$ADDED')"
     FAILED=1
 fi
 capture 15-real-add

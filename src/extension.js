@@ -30,6 +30,9 @@ import * as PopupMenu from 'resource:///org/gnome/shell/ui/popupMenu.js';
 
 // GJS 1.88 no longer auto-promisifies Gio.DBusConnection.call.
 Gio._promisify(Gio.DBusConnection.prototype, 'call');
+// Same for the proxy constructor and its call method.
+Gio._promisify(Gio.DBusProxy, 'new_for_bus', 'new_for_bus_finish');
+Gio._promisify(Gio.DBusProxy.prototype, 'call');
 
 const APP_ID = 'io.github.alainm23.planify';
 const APP_DBUS_NAME = 'io.github.alainm23.planify';
@@ -43,10 +46,9 @@ const BADGE_DOT_CHAR = '\u25CF';
 
 const OPEN_MS = 220;
 const CLOSE_MS = 160;
-const FILE_MONITOR_DEBOUNCE_MS = 250;
-const ROLLOVER_POLL_SECONDS = 120;
-const MAX_QUERY_ROWS = 100;
-const SENTINEL_ID = '__done__';
+const REFRESH_DEBOUNCE_MS = 150;
+const GETTASKS_TIMEOUT_MS = 5000;
+const SAFETY_POLL_SECONDS = 120;
 const DEFAULT_COLOR = '#3584e4';
 
 // Priority semantics follow Todoist: 4 = P1 (most urgent), 1 = none.
@@ -83,69 +85,6 @@ const DEBUG_IFACE_XML = `
   </interface>
 </node>`;
 
-// One statement returns the visible tasks plus today's completion count:
-// tasks first (ORDER BY inside the subselect keeps that), then a sentinel
-// row carrying the count even when the task list is empty. Dates are stored
-// as local time ("YYYY-MM-DD" or "YYYY-MM-DDTHH:MM:SS(+offset)" inside the
-// `due` JSON; the field can also be an empty string), so lexical comparison
-// with date('now','localtime') matches Planify's own "Today" semantics.
-const TASKS_SQL = `
-WITH done AS (
-  SELECT COUNT(*) AS c FROM Items
-  WHERE checked = 1 AND COALESCE(is_deleted, 0) = 0 AND COALESCE(is_trash, 0) = 0
-    AND substr(completed_at, 1, 10) = date('now', 'localtime')
-),
-pinned AS (
-  SELECT i.id AS id,
-         i.content AS content,
-         i.description AS description,
-         i.due AS due,
-         i.priority AS priority,
-         i.pinned AS pinned,
-         i.parent_id AS parent_id,
-         p.name AS project,
-         p.color AS color
-  FROM Items i JOIN Projects p ON p.id = i.project_id
-  WHERE i.pinned = 1 AND i.checked = 0
-    AND COALESCE(i.is_deleted, 0) = 0 AND COALESCE(i.is_trash, 0) = 0
-    AND COALESCE(i.item_type, 'task') = 'task'
-    AND COALESCE(p.is_deleted, 0) = 0 AND COALESCE(p.is_archived, 0) = 0
-    AND COALESCE(i.due, '') != '' OR (i.pinned = 1 AND i.checked = 0)
-  ORDER BY i.child_order ASC
-  LIMIT 10
-),
-tasks AS (
-  SELECT i.id AS id,
-         i.content AS content,
-         i.description AS description,
-         i.due AS due,
-         i.priority AS priority,
-         i.pinned AS pinned,
-         i.parent_id AS parent_id,
-         p.name AS project,
-         p.color AS color
-  FROM Items i JOIN Projects p ON p.id = i.project_id
-  WHERE i.checked = 0
-    AND COALESCE(i.is_deleted, 0) = 0 AND COALESCE(i.is_trash, 0) = 0
-    AND COALESCE(i.item_type, 'task') = 'task'
-    AND COALESCE(p.is_deleted, 0) = 0 AND COALESCE(p.is_archived, 0) = 0
-    AND json_valid(i.due) = 1
-    AND COALESCE(json_extract(i.due, '$.date'), '') != ''
-    AND substr(json_extract(i.due, '$.date'), 1, 10) <= date('now', 'localtime')
-    AND i.pinned = 0
-  ORDER BY substr(json_extract(i.due, '$.date'), 1, 10) ASC,
-           i.priority DESC, i.child_order ASC
-  LIMIT ${MAX_QUERY_ROWS}
-)
-SELECT id, content, description, due, priority, pinned, parent_id, project, color,
-       1 AS is_pinned, NULL AS done_today FROM pinned
-UNION ALL
-SELECT id, content, description, due, priority, pinned, parent_id, project, color,
-       0 AS is_pinned, NULL AS done_today FROM tasks
-UNION ALL
-SELECT '${SENTINEL_ID}', '', '', '', 0, 0, NULL, '', '', 0,
-       (SELECT c FROM done)`;
-
 function logInfo(msg) {
     console.log(`[planify-quick-view] ${msg}`);
 }
@@ -159,33 +98,18 @@ function todayStr() {
     return GLib.DateTime.new_now_local().format('%F');
 }
 
-/** Parse a Planify `due` JSON string into display metadata. */
-function parseDue(dueJson) {
-    try {
-        const o = JSON.parse(dueJson);
-        const date = typeof o.date === 'string' ? o.date : null;
-        if (!date)
-            return null;
-        const hasTime = date.length > 10;
-        return {
-            date: date.slice(0, 10),
-            time: hasTime ? date.slice(11, 16) : null,
-            isRecurring: o.is_recurring === true,
-        };
-    } catch {
-        return null;
-    }
-}
-
-/** Project colors come from the user's DB; keep only safe hex values. */
+// Project colors are opaque backend values (hex, palette key, or empty):
+// keep only safe hex values and fall back otherwise.
 function safeColor(color) {
     return /^#[0-9a-fA-F]{6}$/.test(color ?? '') ? color : DEFAULT_COLOR;
 }
 
 /**
- * Read-only view over Planify's SQLite database. Resolves the database
- * path (native install, Flatpak, or a settings override), spawns the
- * `sqlite3` CLI read-only for queries, and watches the file for changes.
+ * D-Bus client for Planify's exported API — GetTasks + TasksChanged on
+ * io.github.alainm23.planify. There is deliberately no database access:
+ * when Planify isn't running the store reports running = false and the
+ * menu shows a launch hint; when it runs an older build without the API,
+ * unsupported flags the version instead.
  */
 class PlanifyStore {
     constructor(settings, onChanged) {
@@ -193,174 +117,155 @@ class PlanifyStore {
         this._onChanged = onChanged || (() => {});
         this._cancellable = new Gio.Cancellable();
         this._generation = 0;
-        this._monitor = null;
-        this._monitorDebounceId = 0;
-        this._retryId = 0;
+        this._proxy = null;
+        this._refreshDebounceId = 0;
+        this._unsupported = false;
 
         this.tasks = [];        // [{id, content, due{...}, priority, project, color, isSubtask, isOverdue}]
         this.doneToday = 0;
-        this.dbFound = false;
+        this.running = false;
 
-        this._watchFile();
+        this._createProxy();
     }
 
-    get dbPath() {
-        let override = this._settings.get_string('database-path');
-        // Never let a path be parsed as a sqlite3 CLI option.
-        if (override.startsWith('-'))
-            override = `./${override}`;
-        if (override !== '')
-            return override;
-
-        const candidates = [
-            GLib.build_filenamev([GLib.get_user_data_dir(), APP_ID, 'database.db']),
-            GLib.build_filenamev([GLib.get_home_dir(), '.var', 'app', APP_ID,
-                'data', APP_ID, 'database.db']),
-        ];
-        return candidates.find(p => GLib.file_test(p, GLib.FileTest.EXISTS)) || candidates[0];
+    get owner() {
+        return this.running ? APP_DBUS_NAME : null;
     }
 
-    _watchFile() {
-        this._monitor?.cancel();
-        this._monitor = null;
+    get unsupported() {
+        return this._unsupported;
+    }
 
-        if (!GLib.file_test(this.dbPath, GLib.FileTest.EXISTS))
-            return;
-
+    async _createProxy() {
+        // DO_NOT_AUTO_START: Planify ships no D-Bus activation file, so
+        // auto-start would just error — the missing name IS the
+        // "not running" state the UI handles.
         try {
-            this._monitor = Gio.File.new_for_path(this.dbPath)
-                .monitor(Gio.FileMonitorFlags.NONE, null);
-            this._monitor.connect('changed', () => this._scheduleRefresh());
+            this._proxy = await Gio.DBusProxy.new_for_bus(Gio.BusType.SESSION,
+                Gio.DBusProxyFlags.DO_NOT_AUTO_START, null,
+                APP_DBUS_NAME, APP_DBUS_PATH, APP_DBUS_NAME, this._cancellable);
         } catch (e) {
-            logWarn(`file monitor failed: ${e.message}`);
+            logWarn(`dbus proxy failed: ${e.message}`);
+            return;
+        }
+        this._proxy.connect('g-signal', (_p, _sender, signal) => {
+            if (signal === 'TasksChanged')
+                this._scheduleRefresh();
+        });
+        // The proxy's own g-name-owner tracking proved unreliable when the
+        // name is absent at creation time; watch it explicitly instead.
+        this._watchId = Gio.bus_watch_name(Gio.BusType.SESSION, APP_DBUS_NAME,
+            Gio.BusNameWatcherFlags.NONE,
+            () => this._onOwnerChanged(true),
+            () => this._onOwnerChanged(false));
+        this._onOwnerChanged(this.running);
+    }
+
+    _onOwnerChanged(running) {
+        if (running !== this.running) {
+            this.running = running;
+            // A freshly appeared app may be a build without the API.
+            this._unsupported = false;
+        }
+        if (running) {
+            this._scheduleRefresh();
+        } else {
+            this._generation++;
+            this.tasks = [];
+            this.doneToday = 0;
+            this._onChanged(this.snapshot());
         }
     }
 
     _scheduleRefresh() {
-        if (this._monitorDebounceId)
+        if (this._refreshDebounceId)
             return;
-        this._monitorDebounceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT,
-            FILE_MONITOR_DEBOUNCE_MS, () => {
-                this._monitorDebounceId = 0;
-                this.refresh().catch(e => logWarn(`monitor refresh: ${e.message}`));
+        this._refreshDebounceId = GLib.timeout_add(GLib.PRIORITY_DEFAULT,
+            REFRESH_DEBOUNCE_MS, () => {
+                this._refreshDebounceId = 0;
+                this.refresh().catch(e => logWarn(`refresh: ${e.message}`));
                 return GLib.SOURCE_REMOVE;
             });
     }
 
-    /** Re-arm the file watcher if the database appeared or moved. */
-    rewatchIfStale() {
-        if (!this._monitor)
-            this._watchFile();
-    }
+    /** Fetch GetTasks, map the payload onto the row shape, notify. */
+    async refresh() {
+        const generation = ++this._generation;
 
-    /** Query the DB, update the cache, notify the consumer. */
-    refresh() {
-        this.rewatchIfStale();
-
-        if (!GLib.file_test(this.dbPath, GLib.FileTest.EXISTS)) {
-            this._generation++;
+        if (!this.running) {
             this.tasks = [];
             this.doneToday = 0;
-            this.dbFound = false;
             this._onChanged(this.snapshot());
-            return Promise.resolve(this.snapshot());
+            return;
         }
 
-        const generation = ++this._generation;
-        return this._query(TASKS_SQL).then(rows => {
+        try {
+            const res = await this._proxy.call('GetTasks', null,
+                Gio.DBusCallFlags.NONE, GETTASKS_TIMEOUT_MS, this._cancellable);
             if (generation !== this._generation)
-                return this.snapshot(); // superseded by a newer query
+                return; // superseded by a newer refresh
 
+            const [json] = res.deepUnpack();
+            const doc = JSON.parse(json);
             const today = todayStr();
-            this.doneToday = 0;
-            this.tasks = [];
-            for (const row of rows) {
-                if (row.id === SENTINEL_ID) {
-                    this.doneToday = row.done_today ?? 0;
-                    continue;
-                }
-                const due = parseDue(row.due) ||
-                    {date: today, time: null, isRecurring: false};
-                this.tasks.push({
-                    id: row.id,
-                    content: row.content ?? '',
-                    description: row.description ?? '',
+
+            this._unsupported = false;
+            this.doneToday = doc.done_today ?? 0;
+            this.tasks = (doc.tasks ?? []).map(t => {
+                const dueDate = typeof t.due?.date === 'string' ? t.due.date : '';
+                const due = {
+                    date: dueDate.slice(0, 10),
+                    time: dueDate.length > 10 ? dueDate.slice(11, 16) : null,
+                    isRecurring: t.due?.is_recurring === true,
+                };
+                return {
+                    id: t.id ?? '',
+                    content: t.content ?? '',
+                    description: t.description ?? '',
                     due,
-                    priority: row.priority ?? 1,
-                    project: row.project ?? '',
-                    color: safeColor(row.color),
-                    isSubtask: !!row.parent_id,
-                    isPinned: row.is_pinned === 1,
-                    isOverdue: !row.is_pinned && due.date < today,
-                });
+                    priority: t.priority ?? 1,
+                    project: t.project?.name ?? '',
+                    color: safeColor(t.project?.color),
+                    isSubtask: !!t.parent_id,
+                    isPinned: !!t.pinned,
+                    isOverdue: !t.pinned && due.date < today,
+                };
+            }).sort((a, b) => {
+                // The API leaves ordering unspecified: rebuild the UI's
+                // Pinned / Overdue / Today grouping, then due date, then
+                // priority (descending).
+                const group = t => t.isPinned ? 0 : t.isOverdue ? 1 : 2;
+                if (group(a) !== group(b))
+                    return group(a) - group(b);
+                if (a.due.date !== b.due.date)
+                    return a.due.date < b.due.date ? -1 : 1;
+                return b.priority - a.priority;
+            });
+        } catch (e) {
+            if (generation !== this._generation)
+                return;
+            // The running app may predate the GetTasks API — surface that
+            // as an unsupported version instead of stale rows.
+            if (`${e}`.includes('UnknownMethod')) {
+                this._unsupported = true;
+                this.tasks = [];
+                this.doneToday = 0;
+            } else {
+                // Transient (app busy, starting up): keep the last good data.
+                logWarn(`GetTasks failed: ${e.message}`);
             }
-            this.dbFound = true;
-            this._onChanged(this.snapshot());
-            return this.snapshot();
-        });
+        }
+
+        this._onChanged(this.snapshot());
     }
 
     snapshot() {
-        return {tasks: this.tasks, doneToday: this.doneToday, dbFound: this.dbFound};
-    }
-
-    _query(sql, allowRetry = true) {
-        const path = this.dbPath;
-
-        // argv vector only — never a shell string (review + safety).
-        const argv = ['sqlite3', '-readonly', '-json', '-cmd', '.timeout 400', path, sql];
-        const proc = new Gio.Subprocess({
-            argv,
-            flags: Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE,
-        });
-
-        return new Promise((resolve, reject) => {
-            try {
-                // init() throws synchronously if the spawn fails
-                // (e.g. sqlite3 not installed) — surface as rejection.
-                proc.init(this._cancellable);
-            } catch (e) {
-                reject(e);
-                return;
-            }
-            proc.communicate_utf8_async(null, this._cancellable, (p, res) => {
-                try {
-                    const [ok, stdout, stderr] = p.communicate_utf8_finish(res);
-                    if (!ok || p.get_exit_status() !== 0) {
-                        const busy = (stderr ?? '').includes('locked');
-                        if (busy && allowRetry) {
-                            // The writer (Planify / Todoist sync) holds the DB
-                            // for a moment; one short retry is enough.
-                            if (this._retryId)
-                                GLib.Source.remove(this._retryId);
-                            this._retryId = GLib.timeout_add(GLib.PRIORITY_DEFAULT, 120, () => {
-                                this._retryId = 0;
-                                this._query(sql, false).then(resolve, reject);
-                                return GLib.SOURCE_REMOVE;
-                            });
-                            return;
-                        }
-                        reject(new Error((stderr ?? 'sqlite3 failed').trim()));
-                        return;
-                    }
-                    resolve(stdout.trim() ? JSON.parse(stdout) : []);
-                } catch (e) {
-                    reject(e);
-                }
-            });
-        });
-    }
-
-    async isAppRunning() {
-        try {
-            const res = await Gio.DBus.session.call('org.freedesktop.DBus',
-                '/org/freedesktop/DBus', 'org.freedesktop.DBus', 'NameHasOwner',
-                new GLib.Variant('(s)', [APP_DBUS_NAME]), null,
-                Gio.DBusCallFlags.NONE, 1500, this._cancellable);
-            return res.deepUnpack()[0];
-        } catch {
-            return false;
-        }
+        return {
+            tasks: this.tasks,
+            doneToday: this.doneToday,
+            running: this.running,
+            unsupported: this._unsupported,
+        };
     }
 
     /** The app's exported GActions (complete, show-item, snooze-N). */
@@ -372,14 +277,13 @@ class PlanifyStore {
     }
 
     /**
-     * Complete a task. With the app running we delegate to its `complete`
-     * GAction (live UI update). With the app closed we use Planify's own
-     * CLI, which runs the app's core completion path (Services.Store
-     * bookkeeping + Item.complete_item, so recurring tasks advance)
-     * without opening the GUI. The extension never writes the DB itself.
+     * Complete a task by delegating to the app's `complete` GAction (live
+     * UI update; recurring tasks advance inside the app). Rows only exist
+     * while the app runs, so the CLI fallback below is a last-resort for
+     * a race where the app vanished between render and click.
      */
     async requestComplete(taskId) {
-        if (await this.isAppRunning()) {
+        if (this.running) {
             this._activateAppAction('complete', taskId);
         } else {
             this._spawn(['flatpak', 'run', '--command=' + CLI_ID, APP_ID,
@@ -471,15 +375,16 @@ class PlanifyStore {
     destroy() {
         this._generation++;
         this._cancellable.cancel();
-        this._actions = null;
-        for (const id of [this._monitorDebounceId, this._retryId]) {
-            if (id)
-                GLib.Source.remove(id);
+        if (this._refreshDebounceId) {
+            GLib.Source.remove(this._refreshDebounceId);
+            this._refreshDebounceId = 0;
         }
-        this._monitorDebounceId = 0;
-        this._retryId = 0;
-        this._monitor?.cancel();
-        this._monitor = null;
+        if (this._watchId) {
+            Gio.bus_unwatch_name(this._watchId);
+            this._watchId = 0;
+        }
+        this._proxy = null;
+        this._actions = null;
         this.tasks = [];
     }
 }
@@ -1119,8 +1024,10 @@ class QuickViewMenu extends PopupMenu.PopupMenu {
     _updateHeader(snapshot) {
         const n = snapshot.tasks.length;
         const done = snapshot.doneToday;
-        if (!snapshot.dbFound) {
-            this._headerSubtitle.text = _('Planify database not found');
+        if (!snapshot.running) {
+            this._headerSubtitle.text = _('Planify is not running');
+        } else if (snapshot.unsupported) {
+            this._headerSubtitle.text = _('This Planify build has no live task API');
         } else if (n === 0 && done === 0) {
             this._headerSubtitle.text = new Intl.DateTimeFormat(undefined,
                 {weekday: 'long', month: 'long', day: 'numeric'}).format(new Date());
@@ -1130,9 +1037,10 @@ class QuickViewMenu extends PopupMenu.PopupMenu {
                     .format(n, done);
         }
 
-        this._quickAddButton.visible = snapshot.dbFound;
-        this._scroll.visible = n > 0;
-        this._empty.visible = snapshot.dbFound && n === 0;
+        const hasApi = snapshot.running && !snapshot.unsupported;
+        this._quickAddButton.visible = hasApi;
+        this._scroll.visible = hasApi && n > 0;
+        this._empty.visible = hasApi && n === 0;
         this._emptyTitle.text = done > 0
             ? _('All caught up!')
             : _('Nothing due today');
@@ -1429,16 +1337,8 @@ export default class PlanifyQuickViewExtension extends Extension {
             this._syncBadge();
         });
 
-        this._dbPathSettingId = this._settings.connect('changed::database-path', () => {
-            this._store.destroy();
-            this._store = new PlanifyStore(this._settings, () => this._syncBadge());
-            this._menu.setStore(this._store);
-            this._store.refresh()
-                .catch(e => logWarn(`refresh after db-path change: ${e.message}`));
-        });
-
         this._installKeybinding();
-        this._installRolloverPoll();
+        this._installSafetyPoll();
 
         this._store.refresh()
             .catch(e => logWarn(`initial refresh: ${e.message}`));
@@ -1461,11 +1361,11 @@ export default class PlanifyQuickViewExtension extends Extension {
             () => this._menu.toggle());
     }
 
-    _installRolloverPoll() {
-        // Keeps the badge and list honest across midnight and out-of-band
-        // changes the file monitor might have missed.
+    _installSafetyPoll() {
+        // TasksChanged covers live updates while the app runs; this slow
+        // poll is a safety net for missed signals and the midnight edge.
         this._pollId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,
-            ROLLOVER_POLL_SECONDS, () => {
+            SAFETY_POLL_SECONDS, () => {
                 this._store.refresh().catch(() => {});
                 return GLib.SOURCE_CONTINUE;
             });
@@ -1512,22 +1412,17 @@ export default class PlanifyQuickViewExtension extends Extension {
             invocation.return_value(null);
             break;
         case 'Status': {
-            this._store.isAppRunning().then(running => {
-                const state = {
-                    open: this._menu.isOpen,
-                    tasks: this._store.tasks.length,
-                    doneToday: this._store.doneToday,
-                    dbFound: this._store.dbFound,
-                    dbPath: this._store.dbPath,
-                    appRunning: running,
-                    button: this._indicator?.center ?? null,
-                    rows: this._menu._rows.length,
-                };
-                invocation.return_value(new GLib.Variant('(s)', [JSON.stringify(state)]));
-            }).catch(e => {
-                invocation.return_value(new GLib.Variant('(s)',
-                    [JSON.stringify({error: e.message})]));
-            });
+            const state = {
+                open: this._menu.isOpen,
+                tasks: this._store.tasks.length,
+                doneToday: this._store.doneToday,
+                running: this._store.running,
+                unsupported: this._store.unsupported,
+                owner: this._store.owner,
+                button: this._indicator?.center ?? null,
+                rows: this._menu._rows.length,
+            };
+            invocation.return_value(new GLib.Variant('(s)', [JSON.stringify(state)]));
             break;
         }
         case 'Capture': {
@@ -1681,10 +1576,6 @@ export default class PlanifyQuickViewExtension extends Extension {
         if (this._badgeModeSettingId) {
             this._settings.disconnect(this._badgeModeSettingId);
             this._badgeModeSettingId = 0;
-        }
-        if (this._dbPathSettingId) {
-            this._settings.disconnect(this._dbPathSettingId);
-            this._dbPathSettingId = 0;
         }
         if (this._debugSettingId) {
             this._settings.disconnect(this._debugSettingId);

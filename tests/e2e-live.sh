@@ -1,4 +1,10 @@
 #!/usr/bin/env bash
+# Live-data e2e: nested headless shell (extension) + the Sdk-built Planify
+# branch app on Xvfb, against the REAL Planify database. Verifies the full
+# D-Bus client path: app detection, GetTasks payload, live completion.
+# Prereqs: ~/planify-build (Sdk build), ~/planify-sdk-deps, real data at
+# ~/.var/app/io.github.alainm23.planify. Run ./install.sh first.
+
 # Clean-room functional e2e: run the extension inside an isolated headless
 # GNOME Shell (own D-Bus session, own dconf) and verify the state machine:
 # install -> enable -> not-running state -> open -> close -> disable teardown.
@@ -12,7 +18,7 @@
 # assertions live in tests/e2e-real.sh. Animations are disabled here so
 # open/close take the deterministic reduced-motion path.
 set -uo pipefail
-cd "$(dirname "$0")/.."
+cd /home/kzeran/Gits/Planify-Gnome-Extension
 source tests/lib.sh
 
 WORK=/tmp/pqv-nested
@@ -30,9 +36,11 @@ UUID="$1"; WORK="$2"
 LOG="$WORK/shell.log"
 export GSETTINGS_SCHEMA_DIR="$HOME/.local/share/gnome-shell/extensions/$UUID/schemas"
 
+Xvfb :97 -screen 0 1280x800x24 >/dev/null 2>&1 &
+XVFB_PID=$!
 gnome-shell --wayland --headless --virtual-monitor 1400x900 >"$LOG" 2>&1 &
 SHELL_PID=$!
-trap 'kill -9 "$SHELL_PID" 2>/dev/null' EXIT
+trap 'kill -9 "$SHELL_PID" "$XVFB_PID" 2>/dev/null' EXIT
 
 for i in $(seq 1 40); do timeout 5 gnome-extensions list >/dev/null 2>&1 && break; sleep 0.5; done
 if ! timeout 5 gnome-extensions info "$UUID" >/dev/null 2>&1; then
@@ -59,28 +67,48 @@ check() {
     if [[ "$2" == "$3" ]]; then echo "PASS: $1 ($2)"; else echo "FAIL: $1 — expected '$2' got '$3'"; FAILED=1; fi
 }
 
-wait_ext || { echo "FAIL: debug D-Bus never appeared"; tail -40 "$LOG"; exit 1; }
+wait_ext 40 || { echo "FAIL: debug D-Bus never appeared"; tail -40 "$LOG"; exit 1; }
 echo "== debug D-Bus up =="
+
+# Launch the branch-built Planify (Xvfb display) against the real database.
+export GDK_BACKEND=x11 DISPLAY=:97 NO_AT_BRIDGE=1 GTK_A11Y=none
+export XDG_DATA_HOME="$HOME/.var/app/io.github.alainm23.planify/data"
+export XDG_DATA_DIRS="$HOME/planify-branch-test/schemas:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+export LD_LIBRARY_PATH="/home/kzeran/planify-sdk-deps/prefix/lib64:/home/kzeran/planify-sdk-deps/prefix/lib:/home/kzeran/planify-build/core"
+/home/kzeran/planify-build/src/io.github.alainm23.planify --background >/tmp/pqv-app-test.log 2>&1 &
+APP_PID=$!
+OWNED=False
+for i in $(seq 1 40); do
+  gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus \
+    --method org.freedesktop.DBus.NameHasOwner io.github.alainm23.planify 2>/dev/null | grep -q true && { OWNED=True; break; }
+  sleep 0.5
+done
+check "app owns its bus name" True "$OWNED"
+sleep 4
+check "extension sees app as running" True "$(status_key running)"
+check "GetTasks API supported" False "$(status_key unsupported)"
+NTASKS=$(status_key tasks)
+echo "   live tasks visible to the extension: $NTASKS"
 
 # No Planify on this session's bus: the store must report the not-running
 # state cleanly (this is the whole UI contract without the app).
-check "app not running detected" False "$(status_key running)"
+check "app running detected" True "$(status_key running)"
 check "unsupported flag clear" False "$(status_key unsupported)"
-check "no rows without the app" 0 "$(status_key tasks)"
+check "live tasks visible" True "$([[ $(status_key tasks) -gt 0 ]] && echo True || echo False)"
 status_json | python3 -c "
 import sys, json
 s = json.load(sys.stdin)
-assert s['running'] is False and s['unsupported'] is False, s
-assert isinstance(s['tasks'], int) and s['tasks'] == 0, s
-assert s['owner'] is None, s
-print('PASS: status snapshot well-formed (not-running state)')" || FAILED=1
+assert s['running'] is True and s['unsupported'] is False, s
+assert isinstance(s['tasks'], int) and s['tasks'] >= 0, s
+assert s['owner'] == 'io.github.alainm23.planify', s
+print('PASS: status snapshot well-formed (live state)')" || FAILED=1
 
 check "closed initially" False "$(status_key open)"
 
 # --- open (must render the not-running empty state without errors) ---
 ext_call Open >/dev/null; sleep 0.5
 check "open after Open()" True "$(status_key open)"
-check "no rows rendered" 0 "$(status_key rows)"
+check "task rows rendered for live tasks" True "$([[ $(status_key rows) -gt 0 ]] && echo True || echo False)"
 # idempotent open
 ext_call Open >/dev/null; sleep 0.3
 check "double-open is a no-op" True "$(status_key open)"
@@ -110,11 +138,12 @@ OURERR=$(grep -E "JS ERROR" -A 6 "$LOG" | grep -cF "planify-quick-view@" || true
 check "no extension JS errors" 0 "$OURERR"
 grep -E "JS ERROR" "$LOG" | head -3
 
-kill -9 "$SHELL_PID" 2>/dev/null
+kill "$APP_PID" 2>/dev/null
+kill -9 "$SHELL_PID" "$XVFB_PID" 2>/dev/null
 echo "SKIPPED (needs a rendering session + running Planify): live data, visuals, animations, real input — run tests/e2e-real.sh after login"
 exit $FAILED
 INSIDE
 
 RC=$?
-if [[ $RC -eq 0 ]]; then echo "== nested clean-room functional e2e PASSED =="; else echo "== nested clean-room functional e2e FAILED (rc=$RC) =="; fi
+if [[ $RC -eq 0 ]]; then echo "== live-data e2e PASSED =="; else echo "== live-data e2e FAILED (rc=$RC) =="; fi
 exit $RC

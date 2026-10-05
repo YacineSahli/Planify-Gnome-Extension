@@ -1,9 +1,10 @@
 {
   "uuid": "planify-quick-view@yacinesahli.github.io",
   "name": "Planify Quick View",
-  "description": "Adds a Planify button to the GNOME top bar. Clicking it opens a quick-view card with your due-today and overdue tasks; click a task to complete it, click outside or press Escape to dismiss. Tasks are read directly (read-only) from Planify's local database, and completion is delegated to the Planify app so recurring tasks and Todoist sync stay consistent. This extension never writes to the database itself.",
+  "description": "Adds a Planify button to the GNOME top bar. Clicking it opens a quick-view card with your due-today and overdue tasks; click a task to complete it, click outside or press Escape to dismiss. Tasks come live from the Planify app over D-Bus (no database access), and completion is delegated to the app so recurring tasks and sync stay consistent. Start Planify to see your tasks.",
   "shell-version": ["50"],
-  "url": "https://github.com/alainm23/planify",
+  "url": "https://github.com/YacineSahli/Planify-Gnome-Extension",
   "settings-schema": "org.gnome.shell.extensions.planify-quick-view",
-  "gettext-domain": "planify-quick-view"
+  "gettext-domain": "planify-quick-view",
+  "version": 1
 }
