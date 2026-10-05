@@ -140,7 +140,11 @@ A. **Upstream ask (implemented — PR-ready).** `GetTasks() → JSON`
    TasksChanged semantics, NameOwnerChanged/offline note, session-bus
    privacy note). Platform deep-dive: no leaks, exact wire marshalling,
    JSON-string choice validated, GJS consumer verified live.
-   Fork branch `feat/dbus-api` (commit `3df410d5a`): unit suite 20/20,
+   THIRD round: CI-reproducibility green (fresh from-scratch build,
+   mergeable, lint clean; CI never RUNS the core suite), blast-radius GO
+   (all 21 item_updated listeners traced; one cosmetic P2 disclosed),
+   maintainer simulation predicts approve; body cut ~40%.
+   Fork branch `feat/dbus-api` (commit `5fb48c5ce`): unit suite 20/20,
    live integration 19/19 (`tests/dbus-api-live.sh`). PR body:
    `docs/UPSTREAM_DBUS_PR.md` (gitignored); user opens the PR with
    `gh pr create --repo alainm23/planify --base main --head
