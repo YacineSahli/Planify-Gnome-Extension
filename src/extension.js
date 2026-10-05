@@ -602,8 +602,24 @@ class TaskRow extends PopupMenu.PopupBaseMenuItem {
                 const layout = this._title.clutter_text.get_layout();
                 const [, wrappedH] = layout.get_pixel_size();
                 const corrected = Math.ceil(wrappedH) + 4;
-                this._title.set_style(`min-height: ${corrected}px;`);
-                this._title.set_height(corrected);
+                // Glide to the corrected height instead of snapping — the
+                // estimate above is deliberately generous, and a snap here
+                // is what made the expansion wobble. 160 ms so the settle
+                // lands together with the description reveal (60 + 160).
+                const current = this._title.get_height();
+                if (Math.abs(current - corrected) < 2)
+                    return GLib.SOURCE_REMOVE;
+                if (St.Settings.get().enable_animations) {
+                    this._title.set_style(`min-height: ${corrected}px;`);
+                    this._title.ease({
+                        height: corrected,
+                        duration: 160,
+                        mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                    });
+                } else {
+                    this._title.set_style(`min-height: ${corrected}px;`);
+                    this._title.set_height(corrected);
+                }
                 this.queue_relayout();
             } catch {
                 // label gone (rebuild) — nothing to correct
@@ -643,24 +659,39 @@ class TaskRow extends PopupMenu.PopupBaseMenuItem {
     _collapse() {
         this.expanded = false;
         this.remove_style_class_name('pqv-row-expanded');
-        this._title.clutter_text.ellipsize = Pango.EllipsizeMode.END;
-        this._title.clutter_text.line_wrap = false;
-        this._title.clutter_text.single_line_mode = true;
         if (this._titleCorrectId) {
             GLib.Source.remove(this._titleCorrectId);
             this._titleCorrectId = 0;
         }
-        this._title.set_style('');
-        this._title.set_height(-1);
-        this._title.queue_relayout();
-        this.queue_relayout();
+        this._title.remove_all_transitions();
+
         const box = this._descReveal;
+        // Post-expansion state: single-line height, no wrap, no CSS pin.
+        const finish = () => {
+            this._title.clutter_text.ellipsize = Pango.EllipsizeMode.END;
+            this._title.clutter_text.line_wrap = false;
+            this._title.clutter_text.single_line_mode = true;
+            this._title.set_style('');
+            this._title.set_height(-1);
+            this._title.queue_relayout();
+            this.queue_relayout();
+        };
+
         if (!St.Settings.get().enable_animations) {
+            finish();
             box.hide();
             box.height = -1;
             box.opacity = 255;
             return;
         }
+
+        // Ease the title back to its single-line height in step with the
+        // description fade, then restore the truncated single-line look.
+        const [, lineH] = this._title.clutter_text.get_preferred_height(-1);
+        const target = Math.max(1, Math.ceil(lineH) + 4);
+        this._title.set_style('');
+        this._title.set_height(this._title.get_height());
+
         box.remove_all_transitions();
         const current = box.height > 0 ? box.height : box.get_preferred_height(-1)[1];
         box.set({height: current, opacity: 255});
@@ -674,6 +705,12 @@ class TaskRow extends PopupMenu.PopupBaseMenuItem {
                 box.height = -1;
                 box.opacity = 255;
             },
+        });
+        this._title.ease({
+            height: target,
+            duration: 180,
+            mode: Clutter.AnimationMode.EASE_IN_QUAD,
+            onComplete: finish,
         });
     }
 
