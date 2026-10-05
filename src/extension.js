@@ -618,12 +618,10 @@ const TaskRow = GObject.registerClass({
     }
 
     toggleExpand() {
-        logInfo(`DBG toggle ${this.task.id} was=${this.expanded} h=${this._title.get_height()}`);
         if (this.expanded)
             this._collapse();
         else
             this._expand();
-        logInfo(`DBG toggle ${this.task.id} now=${this.expanded}`);
     }
 
     _expand() {
@@ -665,7 +663,6 @@ const TaskRow = GObject.registerClass({
             mode: Clutter.AnimationMode.EASE_OUT_QUAD,
             onComplete: () => {
                 this._title.set_style(`min-height: ${targetH}px;`);
-                logInfo(`DBG expand pin ${this.task.id} h=${targetH}`);
             },
         });
         box.remove_all_transitions();
@@ -713,7 +710,6 @@ const TaskRow = GObject.registerClass({
         const box = this._descReveal;
         // Post-expansion state: single-line height, no wrap, no CSS pin.
         const finish = () => {
-            logInfo(`DBG collapse finish ${this.task.id}`);
             this._title.clutter_text.ellipsize = Pango.EllipsizeMode.END;
             this._title.clutter_text.line_wrap = false;
             this._title.clutter_text.single_line_mode = true;
