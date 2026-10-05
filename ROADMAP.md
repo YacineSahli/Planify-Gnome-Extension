@@ -125,15 +125,18 @@ The extension must not be a database client. Planify owns the semantics
 fixes the fragility, the maintainer's objection, and — via a headless
 service mode — the stale-when-app-closed problem.
 
-A. **Upstream ask (ready to file).** Extend the app's existing
-   `io.github.alainm23.planify` interface (`Services.DBusServer.vala`,
-   currently only `add_item`) with `GetTasks() → JSON` (today + overdue +
-   pinned, Today-view semantics) and a `TasksChanged` signal. Everything
-   is already in memory in `Services.Store` — roughly a filter + small
-   serializer, well under 100 lines. Draft issue text:
-   `docs/UPSTREAM_DBUS_ISSUE.md` (gitignored). Offer: we implement the
-   app-side PR; maintainer shapes the interface if he prefers (query
-   params, variants, separate bus name).
+A. **Upstream ask (implemented — PR-ready).** `GetTasks() → JSON`
+   (today + overdue + pinned-free Today-view semantics + `done_today`)
+   and `TasksChanged` (debounced) on the app's existing
+   `io.github.alainm23.planify` interface (`Services.DBusServer.vala`),
+   plus 4 contract tests in the app's core suite. Implemented on fork
+   branch `feat/dbus-api` (commit `6f1ea0ae2`): unit suite 19/19, live
+   integration 18/18 (isolated session, CLI-seeded, complete-action +
+   signal observed). PR body: `docs/UPSTREAM_DBUS_PR.md` (gitignored);
+   user opens the PR with `gh pr create --repo alainm23/planify --base
+   main --head YacineSahli:feat/dbus-api --body-file
+   docs/UPSTREAM_DBUS_PR.md`. Offer stands: maintainer reshapes the
+   interface (query params, variants, separate bus name) if he prefers.
 B. **Extension-side seam (while waiting).** Isolate all SQLite access
    behind one narrow backend object with the client-facing surface
    (`listTasks()`, `completeTask(id)`, `addTask(text)`, `changed`
