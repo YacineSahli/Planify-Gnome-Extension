@@ -129,12 +129,18 @@ A. **Upstream ask (implemented — PR-ready).** `GetTasks() → JSON`
    (versioned document; due-date side of the Today view + `done_today`)
    and `TasksChanged` (debounced, incl. day rollover) on the app's
    existing `io.github.alainm23.planify` interface
-   (`Services.DBusServer.vala`). Survived an adversarial 3-agent review:
-   fixed orphan-row crash (null project), midnight staleness, UTC/local
-   done-today skew, trash filtering, lint artifact, and replaced the
-   "mirrors Today exactly" claim with the precise contract (deadline-only
-   items/notes/undated-pinned excluded — pinned-query is alainm23's call).
-   Fork branch `feat/dbus-api` (commit `b78bd8d66`): unit suite 20/20,
+   (`Services.DBusServer.vala`). Survived TWO adversarial review rounds
+   (8 subagents total). Round 2: style conformance (DBusTasks casing,
+   named debounce const, comment trims — density verdict: fits the
+   codebase's 2026 layer), a second live bug — `Store.set_item_trash`
+   emitted NO signal so trash never reached clients (fixed: emits
+   `item_updated`), and the PR body now carries the full client-facing
+   contract (ordering unspecified/client-side sort, due.date grammar,
+   opaque project.color, priority encoding, evolution policy,
+   TasksChanged semantics, NameOwnerChanged/offline note, session-bus
+   privacy note). Platform deep-dive: no leaks, exact wire marshalling,
+   JSON-string choice validated, GJS consumer verified live.
+   Fork branch `feat/dbus-api` (commit `3df410d5a`): unit suite 20/20,
    live integration 19/19 (`tests/dbus-api-live.sh`). PR body:
    `docs/UPSTREAM_DBUS_PR.md` (gitignored); user opens the PR with
    `gh pr create --repo alainm23/planify --base main --head
