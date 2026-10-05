@@ -126,17 +126,19 @@ fixes the fragility, the maintainer's objection, and — via a headless
 service mode — the stale-when-app-closed problem.
 
 A. **Upstream ask (implemented — PR-ready).** `GetTasks() → JSON`
-   (today + overdue + pinned-free Today-view semantics + `done_today`)
-   and `TasksChanged` (debounced) on the app's existing
-   `io.github.alainm23.planify` interface (`Services.DBusServer.vala`),
-   plus 4 contract tests in the app's core suite. Implemented on fork
-   branch `feat/dbus-api` (commit `6f1ea0ae2`): unit suite 19/19, live
-   integration 18/18 (isolated session, CLI-seeded, complete-action +
-   signal observed). PR body: `docs/UPSTREAM_DBUS_PR.md` (gitignored);
-   user opens the PR with `gh pr create --repo alainm23/planify --base
-   main --head YacineSahli:feat/dbus-api --body-file
-   docs/UPSTREAM_DBUS_PR.md`. Offer stands: maintainer reshapes the
-   interface (query params, variants, separate bus name) if he prefers.
+   (versioned document; due-date side of the Today view + `done_today`)
+   and `TasksChanged` (debounced, incl. day rollover) on the app's
+   existing `io.github.alainm23.planify` interface
+   (`Services.DBusServer.vala`). Survived an adversarial 3-agent review:
+   fixed orphan-row crash (null project), midnight staleness, UTC/local
+   done-today skew, trash filtering, lint artifact, and replaced the
+   "mirrors Today exactly" claim with the precise contract (deadline-only
+   items/notes/undated-pinned excluded — pinned-query is alainm23's call).
+   Fork branch `feat/dbus-api` (commit `b78bd8d66`): unit suite 20/20,
+   live integration 19/19 (`tests/dbus-api-live.sh`). PR body:
+   `docs/UPSTREAM_DBUS_PR.md` (gitignored); user opens the PR with
+   `gh pr create --repo alainm23/planify --base main --head
+   YacineSahli:feat/dbus-api --body-file docs/UPSTREAM_DBUS_PR.md`.
 B. **Extension-side seam (while waiting).** Isolate all SQLite access
    behind one narrow backend object with the client-facing surface
    (`listTasks()`, `completeTask(id)`, `addTask(text)`, `changed`
