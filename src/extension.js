@@ -658,9 +658,12 @@ const TaskRow = GObject.registerClass({
         try {
             const ct = this._title.clutter_text;
             const layout = Pango.Layout.new(ct.get_pango_context());
-            const font = ct.get_font_description();
-            if (font)
-                layout.setFontDescription(font);
+            // Do NOT use ct.get_font_description(): it hands GJS a pointer
+            // Clutter still owns, and the later double-free takes the whole
+            // session down. The font NAME is a copied string.
+            const fontName = ct.get_font_name();
+            if (fontName)
+                layout.setFontDescription(Pango.FontDescription.from_string(fontName));
             layout.setText(this._title.text, -1);
             layout.set_width(available * Pango.SCALE);
             layout.set_wrap(Pango.WrapMode.WORD);

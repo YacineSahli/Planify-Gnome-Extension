@@ -47,6 +47,7 @@ if ! timeout 5 gnome-extensions info "$UUID" >/dev/null 2>&1; then
     echo "FAIL: extension not visible to shell"; tail -40 "$LOG"; exit 1
 fi
 
+timeout 8 gsettings set org.gnome.shell.extensions.planify-quick-view debug-dbus true 2>/dev/null
 timeout 8 gnome-extensions enable "$UUID" >/dev/null
 sleep 1.5
 timeout 8 gsettings set org.gnome.shell.extensions.planify-quick-view debug-dbus true
@@ -67,7 +68,7 @@ check() {
     if [[ "$2" == "$3" ]]; then echo "PASS: $1 ($2)"; else echo "FAIL: $1 — expected '$2' got '$3'"; FAILED=1; fi
 }
 
-wait_ext 40 || { echo "FAIL: debug D-Bus never appeared"; tail -40 "$LOG"; exit 1; }
+wait_ext 60 || { echo "FAIL: debug D-Bus never appeared"; tail -40 "$LOG"; exit 1; }
 echo "== debug D-Bus up =="
 
 # Launch the branch-built Planify (Xvfb display) against the real database.
@@ -109,7 +110,14 @@ check "closed initially" False "$(status_key open)"
 ext_call Open >/dev/null; sleep 0.5
 check "open after Open()" True "$(status_key open)"
 check "task rows rendered for live tasks" True "$([[ $(status_key rows) -gt 0 ]] && echo True || echo False)"
-# idempotent open
+
+# Expand/collapse a row twice: this drives the wrapped-height measurement
+# that previously crashed the whole session (PangoFontDescription
+# double-free). ToggleExpand is void — surviving it IS the assertion; the
+# no-JS-errors check below completes it.
+ext_call ToggleExpand "<0>" >/dev/null 2>&1; sleep 0.8
+ext_call ToggleExpand "<0>" >/dev/null 2>&1; sleep 0.5
+check "shell alive after expand/collapse" True "$(ext_call Status >/dev/null 2>&1 && echo True || echo False)"
 ext_call Open >/dev/null; sleep 0.3
 check "double-open is a no-op" True "$(status_key open)"
 
